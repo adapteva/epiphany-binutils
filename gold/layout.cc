@@ -1,6 +1,6 @@
 // layout.cc -- lay out output file sections for gold
 
-// Copyright 2006, 2007, 2008, 2009, 2010, 2011, 2012
+// Copyright 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013
 // Free Software Foundation, Inc.
 // Written by Ian Lance Taylor <iant@google.com>.
 
@@ -2168,6 +2168,22 @@ Layout::prepare_for_relaxation()
   this->record_output_section_data_from_script_ = true;
 }
 
+// If the user set the address of the text segment, that may not be
+// compatible with putting the segment headers and file headers into
+// that segment.  For isolate_execinstr() targets, it's the rodata
+// segment rather than text where we might put the headers.
+static inline bool
+load_seg_unusable_for_headers(const Target* target)
+{
+  const General_options& options = parameters->options();
+  if (target->isolate_execinstr())
+    return (options.user_set_Trodata_segment()
+	    && options.Trodata_segment() % target->common_pagesize() != 0);
+  else
+    return (options.user_set_Ttext()
+	    && options.Ttext() % target->common_pagesize() != 0);
+}
+
 // Relaxation loop body:  If target has no relaxation, this runs only once
 // Otherwise, the target relaxation hook is called at the end of
 // each iteration.  If the hook returns true, it means re-layout of
@@ -2220,11 +2236,7 @@ Layout::relaxation_loop_body(
       != General_options::OBJECT_FORMAT_ELF)
     load_seg = NULL;
 
-  // If the user set the address of the text segment, that may not be
-  // compatible with putting the segment headers and file headers into
-  // that segment.
-  if (parameters->options().user_set_Ttext()
-      && parameters->options().Ttext() % target->common_pagesize() != 0)
+  if (load_seg_unusable_for_headers(target))
     {
       load_seg = NULL;
       phdr_seg = NULL;
@@ -3114,6 +3126,20 @@ align_file_offset(off_t off, uint64_t addr, uint64_t abi_pagesize)
   return aligned_off;
 }
 
+// On targets where the text segment contains only executable code,
+// a non-executable segment is never the text segment.
+
+static inline bool
+is_text_segment(const Target* target, const Output_segment* seg)
+{
+  elfcpp::Elf_Xword flags = seg->flags();
+  if ((flags & elfcpp::PF_W) != 0)
+    return false;
+  if ((flags & elfcpp::PF_X) == 0)
+    return !target->isolate_execinstr();
+  return true;
+}
+
 // Set the file offsets of all the segments, and all the sections they
 // contain.  They have all been created.  LOAD_SEG must be be laid out
 // first.  Return the offset of the data to follow.
@@ -3205,8 +3231,15 @@ Layout::set_segment_offsets(const Target* target, Output_segment* load_seg,
 	      addr = (*p)->paddr();
 	    }
 	  else if (parameters->options().user_set_Ttext()
-		   && ((*p)->flags() & elfcpp::PF_W) == 0)
+		   && (parameters->options().omagic()
+		       || is_text_segment(target, *p)))
 	    {
+	      are_addresses_set = true;
+	    }
+	  else if (parameters->options().user_set_Trodata_segment()
+		   && ((*p)->flags() & (elfcpp::PF_W | elfcpp::PF_X)) == 0)
+	    {
+	      addr = parameters->options().Trodata_segment();
 	      are_addresses_set = true;
 	    }
 	  else if (parameters->options().user_set_Tdata()
@@ -3255,7 +3288,10 @@ Layout::set_segment_offsets(const Target* target, Output_segment* load_seg,
 
 		  // If the target wants a fixed minimum distance from the
 		  // text segment to the read-only segment, move up now.
-		  uint64_t min_addr = start_addr + target->rosegment_gap();
+		  uint64_t min_addr =
+		    start_addr + (parameters->options().user_set_rosegment_gap()
+				  ? parameters->options().rosegment_gap()
+				  : target->rosegment_gap());
 		  if (addr < min_addr)
 		    addr = min_addr;
 
